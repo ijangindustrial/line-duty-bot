@@ -1,0 +1,87 @@
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.models import TextSendMessage
+from linebot.exceptions import InvalidSignatureError
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import os
+import datetime
+import sys
+
+app = Flask(__name__)
+
+# === LINE Bot 設定 ===
+line_bot_api = LineBotApi(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN"))
+handler = WebhookHandler(os.environ.get("LINE_CHANNEL_SECRET"))
+
+# === Google Sheets 認證與讀取 ===
+scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+client = gspread.authorize(creds)
+
+sheet = client.open("輪值表").sheet1
+names = sheet.col_values(1)[1:]  # 忽略標題列
+
+def get_weekly_duty(offset_weeks=0):
+    start_date = datetime.date(2025, 1, 1)
+    today = datetime.date.today() + datetime.timedelta(weeks=offset_weeks)
+    delta_weeks = (today - start_date).days // 7
+    index = delta_weeks % len(names)
+    return names[index]
+
+def push_weekly_duty_to_group(group_id):
+    duty = get_weekly_duty(0)
+    message = TextSendMessage(text=f"?? 本週輪值人員是：{duty}")
+    line_bot_api.push_message(group_id, message)
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+    return 'OK'
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    msg = event.message.text.lower().strip()
+
+    if event.source.type == "group":
+        print("Group ID:", event.source.group_id)
+
+    if "今天" in msg or "這週" in msg:
+        duty = get_weekly_duty(0)
+        reply = f"?? 本週輪值的是：{duty}"
+    elif "下週" in msg:
+        duty = get_weekly_duty(1)
+        reply = f"?? 下週輪值的是：{duty}"
+    else:
+        reply = "請輸入「今天輪誰？」或「下週輪誰？」查詢排班。"
+
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply)
+    )
+
+@app.route("/push_duty", methods=["GET"])
+def push_duty_api():
+    GROUP_ID = "你的群組ID"
+    try:
+        push_weekly_duty_to_group(GROUP_ID)
+        return "推播成功", 200
+    except Exception as e:
+        return f"推播失敗: {e}", 500
+
+# 加入這個區塊讓你可以直接執行此腳本推播
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "push":
+        # command line: python app.py push
+        GROUP_ID = "你的群組ID"
+        push_weekly_duty_to_group(GROUP_ID)
+        print("推播完成")
+    else:
+        app.run()
